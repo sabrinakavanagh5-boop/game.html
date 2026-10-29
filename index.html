@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>WebXR Backrooms - GTag Pure HTML Engine</title>
+    <style>
+        body { margin: 0; padding: 0; overflow: hidden; background-color: #000; }
+    </style>
+    <!-- Import Maps: Declares CDN paths inline inside the HTML context safely -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com",
+                "three/addons/": "https://unpkg.com"
+            }
+        }
+    </script>
+</head>
+<body>
+    <script type="module">
+        import * as THREE from 'three';
+        import { VRButton } from 'three/addons/webxr/VRButton.js';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+        // --- Core Variables ---
+        let scene, camera, renderer, xrGroup;
+        let controllers = [];
+        let playerVelocity = new THREE.Vector3(0, 0, 0);
+        
+        // --- Custom Rig References Mapping ---
+        let monkeyModel = null;
+        let monkeyBones = {
+            root: null,
+            body: null,
+            leftWrist: null,
+            rightWrist: null
+        };
+
+        // --- Physics Optimization Targets ---
+        const GRAVITY = -11.0;
+        const BOUNCE_FORCE = 1.85;
+        const FRICTION_DRAG = 0.94;
+        const HAND_COLLIDER_RADIUS = 0.15;
+
+        // --- Procedural Generation Setup ---
+        const GRID_SIZE = 5;
+        const ROOM_SIZE = 6;
+        const WALL_HEIGHT = 3.2;
+        const collisionWalls = [];
+
+        // --- PURE INLINE BLOB STORAGE ASSIGNMENT ---
+        // Your glTF asset JSON representation is compiled inline to run independently
+        const GLTF_ASSET_SCHEMA = {
+            "asset": { "version": "2.0", "generator": "Pure-HTML-Loader" },
+            "scenes": [{ "name": "MainScene", "nodes": [0] }],
+            "scene": 0,
+            "nodes": [
+                { "name": "RootNode", "children": [1] },
+                { "name": "Body_01", "children": [2, 3] },
+                { "name": "L_wrist_06" },
+                { "name": "R_wrist_020" }
+            ]
+        };
+
+        init();
+
+        function init() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x111105);
+            scene.fog = new THREE.FogExp2(0x1c1c0c, 0.16);
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.05, 100);
+            
+            // Base tracker platform anchor setup
+            xrGroup = new THREE.Group();
+            xrGroup.position.set(0, 0.5, 0); 
+            xrGroup.add(camera);
+            scene.add(xrGroup);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.xr.enabled = true;
+            document.body.appendChild(renderer.domElement);
+            document.body.appendChild(VRButton.createButton(renderer));
+
+            setupEnvironment();
+            parseAndLoadMonkey();
+            setupTrackingControllers();
+
+            window.addEventListener('resize', onWindowResize);
+            renderer.setAnimationLoop(animate);
+        }
+
+        function setupEnvironment() {
+            scene.add(new THREE.AmbientLight(0x444425, 0.7));
+
+            const wallMat = new THREE.MeshStandardMaterial({ color: 0xcccc88, roughness: 0.95 });
+            const floorMat = new THREE.MeshStandardMaterial({ color: 0x5e503f, roughness: 0.98 });
+            const ceilingMat = new THREE.MeshStandardMaterial({ color: 0xdfdfe0, roughness: 0.6 });
+
+            const wallGeo = new THREE.BoxGeometry(ROOM_SIZE, WALL_HEIGHT, 0.2);
+            const floorGeo = new THREE.PlaneGeometry(ROOM_SIZE, ROOM_SIZE);
+
+            for (let x = -GRID_SIZE; x <= GRID_SIZE; x++) {
+                for (let z = -GRID_SIZE; z <= GRID_SIZE; z++) {
+                    const posX = x * ROOM_SIZE;
+                    const posZ = z * ROOM_SIZE;
+
+                    const floor = new THREE.Mesh(floorGeo, floorMat);
+                    floor.rotation.x = -Math.PI / 2;
+                    floor.position.set(posX, 0, posZ);
+                    scene.add(floor);
+
+                    const ceiling = new THREE.Mesh(floorGeo, ceilingMat);
+                    ceiling.rotation.x = Math.PI / 2;
+                    ceiling.position.set(posX, WALL_HEIGHT, posZ);
+                    scene.add(ceiling);
+
+                    const light = new THREE.PointLight(0xffffee, 0.45, 9);
+                    light.position.set(posX, WALL_HEIGHT - 0.15, posZ);
+                    scene.add(light);
+
+                    if (Math.abs(x) > 0 || Math.abs(z) > 0) {
+                        if (Math.random() > 0.4) {
+                            const northWall = new THREE.Mesh(wallGeo, wallMat);
+                            northWall.position.set(posX, WALL_HEIGHT / 2, posZ - ROOM_SIZE / 2);
+                            scene.add(northWall);
+                            collisionWalls.push(new THREE.Box3().setFromObject(northWall));
+                        }
+                        if (Math.random() > 0.4) {
+                            const westWall = new THREE.Mesh(wallGeo, wallMat);
+                            westWall.rotation.y = Math.PI / 2;
+                            westWall.position.set(posX - ROOM_SIZE / 2, WALL_HEIGHT / 2, posZ);
+                            scene.add(westWall);
+                            collisionWalls.push(new THREE.Box3().setFromObject(westWall));
+                        }
+                    }
+                }
+            }
+        }
+
+        function parseAndLoadMonkey() {
+            // Converts the JSON blueprint chunk directly into a data stream URL inline
+            const jsonString = JSON.stringify(GLTF_ASSET_SCHEMA);
+            const blob = new Blob([jsonString], { type: 'application/json' });
+            const blobURL = URL.createObjectURL(blob);
+
+            const loader = new GLTFLoader();
+            loader.load(blobURL, (gltf) => {
+                monkeyModel = gltf.scene;
+                scene.add(monkeyModel);
+
+                // Safe structural mapping queries
+                monkeyBones.root = monkeyModel.getObjectByName("RootNode");
+                monkeyBones.body = monkeyModel.getObjectByName("Body_01");
+                monkeyBones.leftWrist = monkeyModel.getObjectByName("L_wrist_06");
+                monkeyBones.rightWrist = monkeyModel.getObjectByName("R_wrist_020");
+
+                // Temporary fallback if model nodes are completely invisible
+                if(!monkeyBones.body) {
+                    const fallbackMesh = new THREE.Mesh(new THREE.SphereGeometry(0.25, 6, 6), new THREE.MeshStandardMaterial({color: 0x4a2c11}));
+                    monkeyModel.add(fallbackMesh);
+                    monkeyBones.body = fallbackMesh;
+                }
+
+                URL.revokeObjectURL(blobURL); // Clear resource tracking memory footprint
+            });
+        }
+
+        function setupTrackingControllers() {
+            for (let i = 0; i < 2; i++) {
+                const controller = renderer.xr.getController(i);
+                controller.addEventListener('connected', (e) => {
+                    controller.handedness = e.data.handedness;
+                    controller.userData.prevWorldPos = new THREE.Vector3();
+                    controller.userData.isActive = true;
+                });
+                controller.addEventListener('disconnected', () => {
+                    controller.userData.isActive = false;
+                });
+                xrGroup.add(controller);
+                controllers.push(controller);
+            }
+        }
+
+        function runGorillaPhysics(dt) {
+            if (dt > 0.08) dt = 0.08;
+
+            playerVelocity.y += GRAVITY * dt;
+            playerVelocity.x *= Math.pow(FRICTION_DRAG, dt * 60);
+            playerVelocity.z *= Math.pow(FRICTION_DRAG, dt * 60);
+
+            xrGroup.position.addScaledVector(playerVelocity, dt);
+
+            controllers.forEach((controller) => {
+                if (!controller.userData.isActive) return;
+
+                const handPos = new THREE.Vector3();
+                controller.getWorldPosition(handPos);
+
+                const handVelocity = handPos.clone().sub(controller.userData.prevWorldPos).divideScalar(dt);
+
+                if (handPos.y <= HAND_COLLIDER_RADIUS) {
+                    if (handVelocity.y < 0) {
+                        playerVelocity.y = -handVelocity.y * BOUNCE_FORCE;
+                        playerVelocity.x += -handVelocity.x * 0.6;
+                        playerVelocity.z += -handVelocity.z * 0.6;
+                    }
+                    xrGroup.position.y += (HAND_COLLIDER_RADIUS - handPos.y);
+                }
+
+                // Wall pushing physics loop implementation
+                collisionWalls.forEach((box) => {
+                    if (box.containsPoint(handPos) || box.distanceToPoint(handPos) < HAND_COLLIDER_RADIUS) {
+                        const boxCenter = new THREE.Vector3();
+                        box.getCenter(boxCenter);
+                        
+                        const pushDirection = handPos.clone().sub(boxCenter);
+                        pushDirection.y = 0;
+                        pushDirection.normalize();
+
+                        const pushStrength = handVelocity.dot(pushDirection);
+                        if (pushStrength < 0) {
+                            playerVelocity.addScaledVector(pushDirection, -pushStrength * BOUNCE_FORCE);
+                        }
+                    }
+                });
+
+                controller.userData.prevWorldPos.copy(handPos);
+            });
+
+            if (xrGroup.position.y < 0.1) {
+                xrGroup.position.y = 0.1;
+Use code with caution.
+if (playerVelocity.y < 0) playerVelocity.y = 0;
+}
+}
+function synchronizeMonkeyBones() {
+if (!monkeyModel || !monkeyBones.body) return;
+const headPos = new THREE.Vector3();
+camera.getWorldPosition(headPos);
+const headRot = new THREE.Quaternion();
+camera.getWorldQuaternion(headRot);
+monkeyModel.position.copy(headPos).add(new THREE.Vector3(0, -0.55, 0));
+monkeyModel.quaternion.copy(headRot);
+monkeyModel.rotation.x = 0;
+monkeyModel.rotation.z = 0;
+controllers.forEach((controller) => {
+if (!controller.userData.isActive) return;
+const cPos = new THREE.Vector3();
+controller.getWorldPosition(cPos);
+const targetWristBone = (controller.handedness === 'left') ? monkeyBones.leftWrist : monkeyBones.rightWrist;
+if (targetWristBone && targetWristBone.parent) {
+targetWristBone.position.copy(targetWristBone.parent.worldToLocal(cPos.clone()));
+}
+});
+}
+function onWindowResize() {
+camera.aspect = window.innerWidth / window.innerHeight;
+camera.updateProjectionMatrix();
+renderer.setSize(window.innerWidth, window.innerHeight);
+}
+const clock = new THREE.Clock();
+function animate() {
+const dt = clock.getDelta();
+runGorillaPhysics(dt);
+synchronizeMonkeyBones();
+renderer.render(scene, camera);
+}
